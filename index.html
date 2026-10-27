@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>The Money Pit</title>
+<meta name="description" content="An agent trading floor, drawn from its own feed. Paper trading only.">
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#0f1020;--panel:#181a2e;--ink:#eef0f6;--muted:#9aa0b4;--line:#2b2d48;--green:#4ade80;--red:#f87171;--gold:#e9c46a;--teal:#5eead4}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%}
+main,header,footer{max-width:560px;margin:0 auto}
+header{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 16px}
+h1{font-size:17px;margin:0;letter-spacing:.02em}
+h2{font-size:14px;margin:0 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.mode{font:600 12px/1 ui-monospace,Menlo,Consolas,monospace;padding:6px 8px;border-radius:6px;background:#22243c;white-space:nowrap}
+.mode.live{color:var(--green)}.mode.replay{color:var(--gold)}.mode.dark{color:var(--muted)}
+.tape{overflow:hidden;white-space:nowrap;border-block:1px solid var(--line);background:#0a0b16;font:13px/30px ui-monospace,Menlo,Consolas,monospace}
+.tape-inner{display:inline-block;padding-left:100%;animation:tape 70s linear infinite}
+.tape span{margin-right:28px}.tape .buy{color:var(--green)}.tape .sell{color:var(--red)}
+@keyframes tape{to{transform:translateX(-100%)}}
+.stage{position:relative;background:#000}
+canvas{display:block;width:100%;height:auto;image-rendering:pixelated;image-rendering:crisp-edges}
+.banner{position:absolute;left:10px;right:10px;bottom:10px;background:rgba(10,11,22,.86);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px}
+.controls{display:flex;gap:8px;padding:10px 16px;flex-wrap:wrap;align-items:center}
+button{font:inherit;color:var(--ink);background:#26284a;border:1px solid var(--line);border-radius:8px;min-height:44px;padding:0 14px}
+button[aria-pressed=true]{background:#3a3d6e;border-color:#5a5fa0}
+.switch{display:flex;align-items:center;gap:8px;min-height:44px;margin-left:auto;color:var(--muted)}
+.switch input{width:22px;height:22px}
+.card{background:var(--panel);margin:12px 16px;padding:12px 14px;border-radius:10px;border:1px solid var(--line)}
+.needs{border-color:#7f2a2a;background:#2a1720}
+.needs h2{color:var(--red)}
+.needs ul{margin:0;padding-left:18px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{padding:6px 4px;text-align:left;border-bottom:1px solid var(--line);font-size:14px}
+th{color:var(--muted);font-weight:500;font-size:12px}
+td.num,th.num{text-align:right}
+.kills{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}
+.kills b{font:700 26px/1 ui-monospace,Menlo,Consolas,monospace;color:var(--red)}
+.muted{color:var(--muted);font-size:13px;margin:8px 0 0}
+.pos{color:var(--green)}.neg{color:var(--red)}
+.feed{list-style:none;margin:0;padding:0;font-size:13px}
+.feed li{padding:6px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.feed time{color:var(--muted);margin-right:6px;font-variant-numeric:tabular-nums}
+footer{padding:4px 16px 32px;color:var(--muted);font-size:12px}
+@media (prefers-reduced-motion:reduce){.tape-inner{animation:none;padding-left:16px}}
+</style>
+</head>
+<body>
+<header><h1>THE MONEY PIT</h1><span id="mode" class="mode">LOADING</span></header>
+<div class="tape" aria-label="Recent fills"><div class="tape-inner" id="tape"></div></div>
+<main>
+  <div class="stage">
+    <canvas id="office" width="180" height="264" role="img" aria-label="Pixel office of the trading floor"></canvas>
+    <div id="banner" class="banner" hidden></div>
+  </div>
+  <div class="controls">
+    <button id="btn-live" type="button" aria-pressed="true">Live</button>
+    <button id="btn-replay" type="button" aria-pressed="false">Replay 24h</button>
+    <label class="switch"><input id="church" type="checkbox"> Church mode</label>
+  </div>
+  <section id="needs" class="card needs" hidden></section>
+  <section class="card">
+    <h2>Leaderboard</h2>
+    <div class="kills"><b id="kills">0</b><span>pitches killed by the Bear</span></div>
+    <table id="leader"></table>
+    <p id="bench" class="muted"></p>
+  </section>
+  <section class="card"><h2>Books</h2><table id="books"></table></section>
+  <section class="card"><h2>The feed</h2><ol id="feed" class="feed"></ol></section>
+</main>
+<footer>Paper trading by AI agents. Not investment advice. Prices are delayed (Yahoo); filings from SEC EDGAR; OTC tiers from OTC Markets. <span id="updated"></span></footer>
+
+<script id="engine">
+/* The floor engine: pure functions, no DOM. Node tests load this block alone. */
+(function (root) {
+'use strict';
+var W = 180, H = 264;
+
+var C = {
+  ink:[20,18,28], wall:[43,45,66], trim:[92,96,128], floorA:[58,60,82], floorB:[53,55,76],
+  carpet:[122,45,38], carpetEdge:[156,70,56], carpetDot:[136,54,45],
+  wood:[150,92,52], woodTop:[186,124,70], woodDark:[104,62,34],
+  screen:[28,44,76], glow:[120,210,220], dim:[40,52,70], frameC:[30,30,38],
+  board:[10,12,16], boardFrame:[74,78,98], green:[74,222,128], red:[248,113,113], gold:[233,196,106],
+  teal:[94,234,212], grey:[156,163,175], white:[241,245,238], blue:[96,165,250],
+  brass:[214,170,80], brassDark:[150,112,40], cage:[134,142,156], glass:[84,112,142], door:[139,94,52],
+  officeIn:[54,48,64], lit:[96,84,60], paper:[236,232,220], paperShade:[190,184,170], cup:[244,244,244],
+  coffee:[110,70,40], night:[6,8,28], cabinet:[112,120,132], cabinetDark:[84,90,102], stamp:[200,40,50],
+  strip:[14,15,26]
+};
+
+/* ---------- 3x5 pixel font ---------- */
+var G = {
+  A:'010101111101101',B:'110101110101110',C:'011100100100011',D:'110101101101110',E:'111100110100111',
+  F:'111100110100100',G:'011100101101011',H:'101101111101101',I:'111010010010111',J:'001001001101010',
+  K:'101101110101101',L:'100100100100111',M:'101111111101101',N:'110101101101101',O:'010101101101010',
+  P:'110101110100100',Q:'010101101110011',R:'110101110101101',S:'011100010001110',T:'111010010010010',
+  U:'101101101101111',V:'101101101101010',W:'101101111111101',X:'101101010101101',Y:'101101010010010',
+  Z:'111001010100111','0':'111101101101111','1':'010110010010111','2':'110001010100111',
+  '3':'110001010001110','4':'101101111001001','5':'111100110001110','6':'011100111101111',
+  '7':'111001010010010','8':'111101111101111','9':'111101111001110',' ':'000000000000000',
+  '.':'000000000000010',',':'000000000010100',':':'000010000010000','-':'000000111000000',
+  '+':'000010111010000','$':'011110010011110','%':'101001010100101','!':'010010010000010',
+  '?':'110001010000010','/':'001001010100100','#':'101111101111101','(':'001010010010001',
+  ')':'100010010010100',"'":'010010000000000','·':'000000010000000','=':'000111000111000',
+  '>':'100010001010100','<':'001010100010001','&':'010101010101011','@':'010101111100011',
+  '_':'000000000000111','*':'000101010101000','"':'101101000000000'
+};
+
+/* ---------- framebuffer ---------- */
+function newFB(w, h) { w = w || W; h = h || H; return {w: w, h: h, data: new Uint8ClampedArray(w * h * 4)}; }
+function px(fb, x, y, c, a) {
+  x = x | 0; y = y | 0;
+  if (x < 0 || y < 0 || x >= fb.w || y >= fb.h) return;
+  var i = (y * fb.w + x) * 4, d = fb.data;
+  if (a === undefined || a >= 255) { d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; }
+  else { var k = a / 255; d[i] = d[i] * (1 - k) + c[0] * k; d[i + 1] = d[i + 1] * (1 - k) + c[1] * k; d[i + 2] = d[i + 2] * (1 - k) + c[2] * k; }
+  d[i + 3] = 255;
+}
+function rect(fb, x, y, w, h, c, a) { for (var j = 0; j < h; j++) for (var i = 0; i < w; i++) px(fb, x + i, y + j, c, a); }
+function box(fb, x, y, w, h, c) { rect(fb, x, y, w, 1, c); rect(fb, x, y + h - 1, w, 1, c); rect(fb, x, y, 1, h, c); rect(fb, x + w - 1, y, 1, h, c); }
+function text(fb, s, x, y, c) {
+  s = String(s).toUpperCase(); var cx = x;
+  for (var n = 0; n < s.length; n++) {
+    var g = G[s[n]] || G['?'];
+    for (var r = 0; r < 5; r++) for (var q = 0; q < 3; q++) if (g.charCodeAt(r * 3 + q) === 49) px(fb, cx + q, y + r, c);
+    cx += 4;
+  }
+  return cx - x - 1;
+}
+function textW(s) { return Math.max(0, String(s).length * 4 - 1); }
+function copyFB(dst, src) { dst.data.set(src.data); }
+function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
+
+/* ---------- church mode: the same floor, clean language ---------- */
+var SALTY = [
+  [/\bgod ?damn(ed)?\b/gi, 'gosh-darn'], [/\bdamn(ed|it)?\b/gi, 'darn'], [/\bhell\b/gi, 'heck'],
+  [/\bbull ?shit\b/gi, 'baloney'], [/\bshitty\b/gi, 'lousy'], [/\bshit\b/gi, 'shoot'],
+  [/\bf+u+c+k+i+n+g?\b/gi, 'flipping'], [/\bf+u+c+k+(ed|er)?\b/gi, 'fudge'], [/\bwtf\b/gi, 'what the heck'],
+  [/\bcrappy\b/gi, 'junky'], [/\bcrap\b/gi, 'junk'], [/\bjackass\b/gi, 'donkey'], [/\bdumbass\b/gi, 'dimwit'],
+  [/\bass\b/gi, 'rear'], [/\bbastards?\b/gi, 'rascal'], [/\bpissed\b/gi, 'peeved'], [/\bsucks\b/gi, 'stinks'],
+  [/\bsucker\b/gi, 'sap'], [/\bbloody\b/gi, 'flaming']
+];
+function church(s) {
+  s = String(s == null ? '' : s);
+  for (var i = 0; i < SALTY.length; i++) s = s.replace(SALTY[i][0], SALTY[i][1]);
+  return s;
+}
+
+/* ---------- the room ---------- */
+var DESKS = {'desk-1': {x: 6, y: 60}, 'desk-2': {x: 40, y: 60}, 'desk-3': {x: 6, y: 94}, 'desk-4': {x: 40, y: 94}};
+var CARPET = {x: 74, y: 56, w: 60, h: 84};
+var CONF = {x: 138, y: 72, w: 42, h: 72};
+var CAGE = {x: 96, y: 152, w: 82, h: 74};
+var OFFICE = {x: 136, y: 0, w: 44, h: 60};
+var BEAR_DESK = {x: 4, y: 162, w: 44, h: 14};
+var FILING = {x: 52, y: 150, w: 26, h: 32};
+var BOARD = {x: 28, y: 4, w: 104, h: 41};
+var BELL = {x: 10, y: 13};
+var AISLES = [54, 146, 228];
+var EXIT = {x: -14, y: 54};
+
+// seats are desks; people sit at their desk's home spot
+var DESK_ORDER = ['bull-1', 'bull-2', 'bull-3', 'bull-4', 'bear', 'risk', 'janitor'];
+var HOME = {
+  'bull-1': {x: 19, y: 86}, 'bull-2': {x: 53, y: 86}, 'bull-3': {x: 19, y: 120}, 'bull-4': {x: 53, y: 120},
+  'bear': {x: 26, y: 192}, 'risk': {x: 133, y: 196}, 'janitor': {x: -12, y: 146}, 'floor': {x: -40, y: -40}
+};
+var SPEED = {bull: 46, bear: 14, risk: 30, janitor: 24};
+var DWELL = 7000, BUBBLE = 4500, BELL_MS = 2600, SWEEP_MS = 9000, ITEM_DELAY = 600, MERGE_SWEEP = 12000;
+
+// The opening cast, as in roster.json: used when a feed has no cast yet.
+var DEFAULT_CAST = {seats: {'bull-1': 'dash', 'bull-2': 'rory', 'bull-3': 'lulu', 'bull-4': 'moxie', bear: 'mort', risk: 'pru', janitor: 'sal'},
+  people: {
+    dash: {name: 'Dash', role: 'bull', desk: 'bull-1', sprite: {base: 'human', head: 'slick', colors: {hair: '#282024', skin: '#eec098', top: '#244078', accent: '#d63031', pants: '#2c2c3c'}}},
+    rory: {name: 'Rory', role: 'bull', desk: 'bull-2', sprite: {base: 'human', head: 'hardhat', colors: {hat: '#facc15', skin: '#d6a078', top: '#f28c28', accent: '#fff0a0', pants: '#3c5a96'}}},
+    lulu: {name: 'Lulu', role: 'bull', desk: 'bull-3', sprite: {base: 'human', head: 'bun', colors: {hair: '#ff6fb5', skin: '#fad6b4', top: '#7c4db7', accent: '#fafafa', pants: '#323040'}}},
+    moxie: {name: 'Moxie', role: 'bull', desk: 'bull-4', sprite: {base: 'human', head: 'cap', colors: {hat: '#2e7d32', hair: '#784828', skin: '#be825a', top: '#5c783c', accent: '#d6be8c', pants: '#a88c64'}}},
+    mort: {name: 'Mort', role: 'bear', desk: 'bear', sprite: {base: 'bear', colors: {fur: '#78502e', muzzle: '#c4a078', top: '#3c3c44', shirt: '#ececec', accent: '#8c1e28', pants: '#32323a'}}},
+    pru: {name: 'Pru', role: 'risk', desk: 'risk', sprite: {base: 'human', head: 'bob', glasses: true, prop: 'clipboard', colors: {hair: '#9ea3aa', skin: '#ecc8aa', top: '#3e4451', accent: '#f5f5f5', pants: '#3e4451'}}},
+    sal: {name: 'Sal', role: 'janitor', desk: 'janitor', sprite: {base: 'human', head: 'capback', prop: 'mop', colors: {hat: '#285aa0', hair: '#5a5a5a', skin: '#c8966e', top: '#305d8a', accent: '#96bee6', pants: '#305d8a'}}}
+  }};
+
+function roleOfDesk(d) { return d && d.indexOf('bull') === 0 ? 'bull' : d; }
+
+function place(where, desk) {
+  var i = Math.max(0, DESK_ORDER.indexOf(desk));
+  if (DESKS[where]) return {x: DESKS[where].x + 13, y: DESKS[where].y + 26};
+  switch (where) {
+    case 'bear-desk': return desk === 'bear' ? HOME.bear : {x: 52, y: 196};
+    case 'filing': return {x: 60 + (i % 3) * 6, y: 194};
+    case 'cage': return desk === 'risk' ? HOME.risk : {x: 88, y: 212 - (i % 3) * 4};
+    case 'conference': {
+      var seats = [[144, 104], [144, 118], [144, 132], [174, 104], [174, 118], [174, 132]];
+      var s = seats[i % seats.length]; return {x: s[0], y: s[1]};
+    }
+    case 'board': return {x: 40 + i * 14, y: 56};
+    case 'bell': return {x: 15, y: 56};
+    case 'office': return {x: 157, y: 70};
+    case 'carpet': return {x: 104, y: 100};
+    default: return HOME[desk] || {x: 90, y: 146};
+  }
+}
+
+function route(a, b) {
+  var best = AISLES[0], cost = Infinity;
+  for (var k = 0; k < AISLES.length; k++) {
+    var c = Math.abs(a.y - AISLES[k]) + Math.abs(b.y - AISLES[k]);
+    if (c < cost) { cost = c; best = AISLES[k]; }
+  }
+  if (Math.abs(a.x - b.x) < 2) return [a, b];
+  return [a, {x: a.x, y: best}, {x: b.x, y: best}, b];
+}
+function walkSegs(pts, t0, speed) {
+  var segs = [], t = t0;
+  for (var i = 1; i < pts.length; i++) {
+    var d = Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+    if (d < 0.5) continue;
+    var dt = d / speed * 1000;
+    segs.push({s0: t, s1: t + dt, a: pts[i - 1], b: pts[i]}); t += dt;
+  }
+  return segs;
+}
+function sample(segs, t, fallback) {
+  if (!segs.length) return {x: fallback.x, y: fallback.y, moving: false};
+  if (t <= segs[0].s0) return {x: segs[0].a.x, y: segs[0].a.y, moving: false};
+  for (var i = 0; i < segs.length; i++) {
+    var s = segs[i];
+    if (t <= s.s1) {
+      if (t < s.s0) return {x: s.a.x, y: s.a.y, moving: false};
+      var f = (t - s.s0) / (s.s1 - s.s0);
+      return {x: s.a.x + (s.b.x - s.a.x) * f, y: s.a.y + (s.b.y - s.a.y) * f, moving: true};
+    }
+  }
+  var l = segs[segs.length - 1];
+  return {x: l.b.x, y: l.b.y, moving: false};
+}
+function segsEnd(segs, t) { return segs.length ? segs[segs.length - 1].s1 : t; }
+
+/* ---------- time ---------- */
+var ETF = null;
+function et(ms) {
+  if (!ETF) ETF = new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', hourCycle: 'h23', year: 'numeric',
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', weekday: 'short'});
+  var o = {}, parts = ETF.formatToParts(new Date(ms));
+  for (var i = 0; i < parts.length; i++) o[parts[i].type] = parts[i].value;
+  return {date: o.year + '-' + o.month + '-' + o.day, h: +o.hour % 24, m: +o.minute, wd: o.weekday};
+}
+function midnightsBetween(a, b) {
+  var out = [], t = a, d = et(a).date;
+  while (t < b) {
+    var n = Math.min(b, t + 3600000), nd = et(n).date;
+    if (nd !== d) {
+      var lo = t, hi = n;
+      while (hi - lo > 1000) { var mid = (lo + hi) / 2; if (et(mid).date === d) lo = mid; else hi = mid; }
+      out.push(Math.round(hi / 60000) * 60000); d = nd;
+    }
+    t = n;
+  }
+  return out;
+}
+function lastMidnight(ms) {
+  var r = midnightsBetween(ms - 26 * 3600000, ms);
+  return r.length ? r[r.length - 1] : ms - 24 * 3600000;
+}
+function isNight(ms) { var h = et(ms).h; return h >= 20 || h < 7; }
+
+/* ---------- schedule: moves -> events on a screen-time axis (ms) ----------
+   A move's place in time is its play_at (the publisher spreads each session
+   run's moves over the hour after the run), falling back to t. */
+function ms(m) { return Date.parse(m.play_at || m.t); }
+function byPlay(a, b) { return ms(a) - ms(b) || (a.t < b.t ? -1 : a.t > b.t ? 1 : (a.id < b.id ? -1 : 1)); }
+function withST(m, st) { var e = {}; for (var k in m) e[k] = m[k]; e.st = st; e.rt = ms(m); return e; }
+
+function schedule(moves, opts) {
+  opts = opts || {};
+  var sorted = (moves || []).slice().sort(byPlay), events = [], n = sorted.length, i;
+  if ((opts.mode || 'replay') === 'live') {
+    var nowReal = opts.nowReal || Date.now(), nowSt = opts.nowSt || 0, last = -Infinity;
+    for (i = 0; i < n; i++) {
+      var pt = ms(sorted[i]);
+      if (pt <= nowReal) events.push(withST(sorted[i], -1e9 + i));      // already happened
+      else { var st = Math.max(nowSt + (pt - nowReal), last + 1500); last = st; events.push(withST(sorted[i], st)); }
+    }
+    return finish({mode: 'live', events: events, t0: n ? ms(sorted[0]) : 0, t1: n ? ms(sorted[n - 1]) : 0,
+      compress: 1, duration: Infinity});
+  }
+  var t0 = opts.t0 != null ? opts.t0 : (n ? ms(sorted[0]) : 0);
+  var t1 = opts.t1 != null ? opts.t1 : (n ? ms(sorted[n - 1]) : t0);
+  var compress = Math.max(1, (t1 - t0) / (opts.duration || 240000));
+  var gap = opts.minGap != null ? opts.minGap : 700, prev = -Infinity;
+  for (i = 0; i < n; i++) {
+    var s2 = Math.max((ms(sorted[i]) - t0) / compress, prev + gap); prev = s2;
+    events.push(withST(sorted[i], s2));
+  }
+  return finish({mode: 'replay', events: events, t0: t0, t1: t1, compress: compress, duration: (n ? prev : 0) + 16000});
+}
+function finish(s) {
+  s.sweeps = computeSweeps(s);
+  return s;
+}
+function addLive(s, moves, nowSt, nowReal, spacing) {
+  var known = {}, i;
+  for (i = 0; i < s.events.length; i++) known[s.events[i].id] = 1;
+  var fresh = (moves || []).filter(function (m) { return !known[m.id]; }).sort(byPlay);
+  var last = s.events.length ? s.events[s.events.length - 1].st : -Infinity;
+  for (i = 0; i < fresh.length; i++) {
+    var st = Math.max(nowSt + Math.max(0, ms(fresh[i]) - (nowReal || Date.now())), last + (spacing || 1500)); last = st;
+    s.events.push(withST(fresh[i], st));
+  }
+  if (fresh.length) { s.t1 = ms(fresh[fresh.length - 1]); finish(s); }
+  return fresh.length;
+}
+function clockAt(s, st) {
+  var e = s.events;
+  if (!e.length) return s.t0;
+  if (st <= e[0].st) return e[0].rt + (st - e[0].st) * s.compress;
+  for (var i = 1; i < e.length; i++) {
+    if (st <= e[i].st) {
+      var a = e[i - 1], b = e[i];
+      return a.rt + (b.rt - a.rt) * ((st - a.st) / Math.max(1, b.st - a.st));
+    }
+  }
+  var l = e[e.length - 1];
+  return l.rt + (st - l.st) * s.compress;
+}
+function stAtClock(s, rt) {
+  var e = s.events;
+  if (!e.length) return 0;
+  if (rt <= e[0].rt) return e[0].st - (e[0].rt - rt) / s.compress;
+  for (var i = 1; i < e.length; i++) {
+    if (rt <= e[i].rt) {
+      var a = e[i - 1], b = e[i];
+      return a.st + (b.st - a.st) * ((rt - a.rt) / Math.max(1, b.rt - a.rt));
+    }
+  }
+  var l = e[e.length - 1];
+  return l.st + (rt - l.rt) / s.compress;
+}
+function computeSweeps(s) {
+  var out = [], i;
+  if (s.mode === 'replay' && s.events.length) {
+    var mids = midnightsBetween(s.t0, s.t1);
+    for (i = 0; i < mids.length; i++) out.push({st: stAtClock(s, mids[i]), rt: mids[i]});
+  }
+  for (i = 0; i < s.events.length; i++) if (s.events[i].tone === 'sweep' && s.events[i].st > -1e8) out.push({st: s.events[i].st, rt: s.events[i].rt});
+  out.sort(function (a, b) { return a.st - b.st; });
+  var merged = [];
+  for (i = 0; i < out.length; i++) if (!merged.length || out[i].st - merged[merged.length - 1].st >= MERGE_SWEEP) merged.push(out[i]);
+  return merged;
+}
+
+/* ---------- the janitor's zigzag across the carpet ---------- */
+var ROWS = 4;
+function salAt(sw, st) {
+  var x0 = CARPET.x + 2, x1 = CARPET.x + CARPET.w - 4;
+  var p = (st - sw.st) / SWEEP_MS;
+  if (p < 0) { var f = Math.min(1, (st - sw.st + 3000) / 3000); return {x: -12 + (x0 + 12) * f, y: 146, moving: true}; }
+  if (p > 1) { var g = Math.min(1, (st - sw.st - SWEEP_MS) / 3000); return {x: x0 + (-12 - x0) * g, y: 146, moving: g < 1}; }
+  var r = Math.min(ROWS - 1, Math.floor(p * ROWS)), fr = p * ROWS - r;
+  var y = CARPET.y + 10 + r * ((CARPET.h - 16) / (ROWS - 1));
+  return {x: r % 2 ? x1 - (x1 - x0) * fr : x0 + (x1 - x0) * fr, y: y, moving: true};
+}
+function sweptAt(sw, it) {
+  var x0 = CARPET.x + 2, x1 = CARPET.x + CARPET.w - 4;
+  var rowH = (CARPET.h - 16) / (ROWS - 1);
+  var r = Math.max(0, Math.min(ROWS - 1, Math.round((it.y - CARPET.y - 10) / rowH)));
+  var fr = (it.x - x0) / (x1 - x0); if (r % 2) fr = 1 - fr;
+  return sw.st + ((r + Math.max(0, Math.min(1, fr))) / ROWS) * SWEEP_MS;
+}
+
+function hash(s) { var h = 2166136261 >>> 0; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h; }
+function itemPos(id) { var h = hash(String(id)); return {x: CARPET.x + 4 + (h % (CARPET.w - 10)), y: CARPET.y + 6 + ((h >>> 12) % (CARPET.h - 12))}; }
+
+/* ---------- people ---------- */
+function castOf(ctx) { return (ctx && ctx.feed && ctx.feed.cast && ctx.feed.cast.people) ? ctx.feed.cast : DEFAULT_CAST; }
+function personOf(cast, id) { return (cast.people && cast.people[id]) || DEFAULT_CAST.people[id] || null; }
+
+// Who acts on the floor: everyone seated, plus anyone who appears in the moves
+// (a person fired or hired today). Moves by "floor" itself are not a person.
+function actors(s, cast) {
+  var map = {}, order = [], d;
+  function add(id, desk) {
+    if (!id || map[id] || desk === 'janitor' || id === 'floor') return;
+    var p = personOf(cast, id);
+    desk = (p && p.desk) || desk;
+    map[id] = {id: id, desk: desk, role: (p && p.role) || roleOfDesk(desk), events: []};
+    order.push(id);
+  }
+  for (d in cast.seats) if (cast.seats[d]) add(cast.seats[d], d);
+  for (var i = 0; i < s.events.length; i++) {
+    var e = s.events[i], id = e.char || (e.who !== 'floor' ? (cast.seats || {})[e.who] || e.who : null);
+    if (!id || id === 'floor') continue;
+    add(id, e.who);
+    if (map[id]) map[id].events.push(e);
+  }
+  return order.map(function (k) { return map[k]; });
+}
+
+function bubbleFor(e, ch) {
+  var t = e.tone, w = e.what || '';
+  if (t === 'kill') return {tag: 'KILL!', c: 'red'};
+  if (t === 'fill') return {tag: /^SELL/.test(w) ? 'SELL' : 'BUY', c: 'green'};
+  if (t === 'pitch') return {tag: 'LONG!', c: 'gold'};
+  if (t === 'survive') return {tag: e.who === 'risk' ? 'PASS' : 'OK', c: 'teal'};
+  if (t === 'discard') return {tag: e.who === 'risk' ? 'NO' : 'NAH', c: 'grey'};
+  if (t === 'sweep') return {tag: 'SWISH', c: 'white'};
+  if (t === 'fire') return {tag: 'BYE', c: 'grey'};
+  if (t === 'hire') return {tag: 'HI!', c: 'gold'};
+  if (t === 'done') return {tag: 'DONE', c: 'white'};
+  if (t === 'system') return {tag: '...', c: 'grey'};
+  var p = /p\.(\d+)/.exec(w);
+  if (p) return {tag: 'P.' + p[1], c: 'blue'};
+  return {tag: e.ticker ? e.ticker : '...', c: 'blue'};
+}
+function boardLine(e) {
+  var t = e.ticker || '';
+  if (e.tone === 'fill') { var m = /^(BUY|SELL) ([\d,]+) (\S+) @ ([\d.]+)/.exec(e.what || ''); return m ? {s: m[1] + ' ' + m[3] + ' ' + m[4], c: m[1] === 'BUY' ? 'green' : 'red'} : null; }
+  if (e.tone === 'pitch') return {s: 'PITCH ' + t, c: 'gold'};
+  if (e.tone === 'kill') return {s: 'KILL ' + t, c: 'red'};
+  if (e.tone === 'survive') return {s: (e.who === 'risk' ? 'PASS ' : 'LIVES ') + t, c: 'teal'};
+  if (e.tone === 'discard' && t) return {s: 'REJECT ' + t, c: 'grey'};
+  return null;
+}
+function lastIndexAt(events, st) {
+  var lo = 0, hi = events.length - 1, ans = -1;
+  while (lo <= hi) { var mid = (lo + hi) >> 1; if (events[mid].st <= st) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
+  return ans;
+}
+
+// Where one person is at screen time st, or null if they are not on the floor
+// (not hired yet, or already walked out after being fired).
+function personAt(a, st) {
+  var home = HOME[a.desk] || HOME.floor, speed = SPEED[a.role] || 30, evs = a.events;
+  var segs = [], pos = home, last = null, born = -Infinity, gone = Infinity;
+  if (evs.length && evs[0].tone === 'hire') { born = evs[0].st; pos = place('office', a.desk); }
+  for (var i = 0; i < evs.length && evs[i].st <= st; i++) {
+    var e = evs[i], p = sample(segs, e.st, pos), tgt = place(e.where, a.desk);
+    var to = walkSegs(route(p, tgt), e.st, speed), arrive = segsEnd(to, e.st);
+    if (e.tone === 'fire') {
+      var out = walkSegs(route(tgt, EXIT), arrive + DWELL, speed);
+      segs = to.concat(out); gone = segsEnd(out, arrive + DWELL);
+    } else {
+      segs = to.concat(walkSegs(route(tgt, home), arrive + DWELL, speed));
+    }
+    pos = p; last = e;
+  }
+  if (st < born || st > gone) return null;
+  var s = sample(segs, st, pos);
+  return {id: a.id, desk: a.desk, role: a.role, x: s.x, y: s.y, moving: s.moving, last: last,
+    bubble: last && st - last.st < BUBBLE ? bubbleFor(last) : null};
+}
+
+function sceneAt(s, st, ctx) {
+  ctx = ctx || {};
+  var ch = !!ctx.church, cast = castOf(ctx);
+  var clock = s.mode === 'live' ? (ctx.nowReal || Date.now()) : clockAt(s, st);
+  var idx = lastIndexAt(s.events, st), played = idx + 1, i, e;
+  var night = isNight(clock), chars = [];
+  var acts = actors(s, cast);
+  for (i = 0; i < acts.length; i++) {
+    var c = personAt(acts[i], st);
+    if (!c) continue;
+    var recent = c.last && (clock - c.last.rt) < 3600000;
+    if (!night || recent || c.moving) chars.push(c);
+  }
+  // the night janitor
+  var sweeps = s.sweeps.slice();
+  if (s.mode === 'live') { var lm = lastMidnight(clock); sweeps = [{st: st - (clock - lm), rt: lm}]; }
+  var sal = (cast.seats && cast.seats.janitor) || 'sal';
+  for (i = 0; i < sweeps.length; i++) {
+    var sw = sweeps[i];
+    if (st >= sw.st - 3000 && st <= sw.st + SWEEP_MS + 3000) {
+      var j = salAt(sw, st);
+      chars.push({id: sal, desk: 'janitor', role: 'janitor', x: j.x, y: j.y, moving: j.moving,
+        sweeping: st >= sw.st && st <= sw.st + SWEEP_MS,
+        bubble: st >= sw.st && st < sw.st + 2500 ? {tag: 'SWISH', c: 'white'} : null});
+    }
+  }
+  // carpet discards: swept once Sal passes them, by a sweep that came after them
+  var items = [];
+  for (i = 0; i <= idx; i++) {
+    e = s.events[i];
+    if (!e.item) continue;
+    var pos = itemPos(e.id), gone = false;
+    if (e.st + ITEM_DELAY > st) continue;
+    for (var k = 0; k < sweeps.length && !gone; k++) if (e.rt < sweeps[k].rt && st >= sweptAt(sweeps[k], pos)) gone = true;
+    if (!gone) items.push({id: e.id, kind: e.item, x: pos.x, y: pos.y});
+  }
+  var bell = false, board = [], kills = 0, killsInWindow = 0, lastLine = '', desksActive = {};
+  for (i = 0; i < s.events.length; i++) if (s.events[i].tone === 'kill') killsInWindow++;
+  for (i = 0; i <= idx; i++) {
+    e = s.events[i];
+    if (e.tone === 'kill') kills++;
+    if (e.where === 'bell' && st - e.st < BELL_MS) bell = true;
+    var bl = boardLine(e);
+    if (bl) { board.push(bl); if (board.length > 4) board.shift(); }
+    if (e.line) lastLine = e.line;
+    if (e.who && e.who.indexOf('bull') === 0) desksActive[e.who] = e;
+  }
+  var base = Math.max(0, ((ctx.ledger && ctx.ledger.kill_count) || 0) - killsInWindow);
+  chars.sort(function (a, b) { return a.y - b.y; });
+  return {
+    st: st, clock: clock, et: et(clock), night: night, mode: s.mode, played: played, total: s.events.length,
+    chars: chars, items: items, bell: bell, board: board, kills: base + kills, church: ch,
+    lastLine: ch ? church(lastLine) : lastLine, needs: ((ctx.feed && ctx.feed.needs_cullon) || []).length,
+    dark: !!ctx.dark && s.mode === 'live', cast: cast, desksActive: desksActive
+  };
+}
+
+/* ---------- sprites, built from each person's sprite spec ---------- */
+var K = [22, 20, 28], EYE = [22, 20, 28], NOSE = [30, 24, 24], GLASS = [220, 220, 232];
+var HEADS = {
+  slick: ['..HHHH..', '.HHHHHH.', '.HSSSSH.'], hardhat: ['..AAAA..', '.AAAAAA.', 'AAAAAAAA'],
+  bun: ['...HH...', '.HHHHHH.', 'HHSSSSHH'], cap: ['.AAAA...', 'AAAAAAA.', '.HSSSSH.'],
+  bob: ['..HHHH..', '.HHHHHH.', 'HHSSSSHH'], capback: ['..AAAA..', '.AAAAAAA', '.HSSSSH.'],
+  bald: ['........', '..SSSS..', '.SSSSSS.'], mohawk: ['...HH...', '..SHHS..', '.SSSSSS.'],
+  curly: ['.H.HH.H.', 'HHHHHHHH', 'HHSSSSHH'], beanie: ['...AA...', '.AAAAAA.', '.AAAAAA.']
+};
+var FACE = ['.SESSES.', '.SSSSSS.', '..SSSS..'], FACE_GLASSES = ['HgEggEgH', '.SSSSSS.', '..SSSS..'];
+var TORSO = ['.CCTTCC.', 'CCCTTCCC', 'SCCTTCCS', '.CCCCCC.'];
+var LEGS = {stand: ['.PP..PP.', '.KK..KK.'], a: ['.PP..KK.', '.KK.....'], b: ['.KK..PP.', '.....KK.']};
+var BEAR = ['.BB....BB.', '.BBBBBBBB.', 'BBBBBBBBBB', 'BBEBBBBEBB', 'BBBMMMMBBB', '.BBMNNMBB.', '..CCWWCC..',
+  '.CCCWTCCC.', 'BCCCTTCCCB', '.CCCCCCCC.'];
+var BEAR_LEGS = {stand: ['.PPP..PPP.', '.KKK..KKK.'], a: ['.PPP..KKK.', '.KKK......'], b: ['.KKK..PPP.', '......KKK.']};
+var GENERIC = {base: 'human', head: 'bald', colors: {skin: '#d8a880', top: '#666a80', accent: '#dddddd', pants: '#333344'}};
+var spriteCache = {};
+function buildSprite(spec, role, frame) {
+  spec = spec || GENERIC;
+  var key = JSON.stringify(spec) + role + frame;
+  if (spriteCache[key]) return spriteCache[key];
+  var c = spec.colors || {}, rows, pal;
+  if (spec.base === 'bear') {
+    rows = BEAR.concat(BEAR_LEGS[frame]);
+    pal = {B: c.fur, M: c.muzzle, C: c.top, W: c.shirt, T: c.accent, P: c.pants};
+  } else {
+    var torso = TORSO.slice();
+    if (role === 'bull' && frame !== 'stand') torso[2] = frame === 'a' ? 'SCCTTCC.' : '.CCTTCCS'; // arms swing
+    rows = (HEADS[spec.head] || HEADS.bald).concat(spec.glasses ? FACE_GLASSES : FACE, torso, LEGS[frame]);
+    pal = {H: c.hair || c.hat || c.skin, A: c.hat || c.hair || c.top, S: c.skin, C: c.top, T: c.accent, P: c.pants};
+  }
+  var rgb = {E: EYE, K: K, N: NOSE, g: GLASS};
+  for (var k in pal) if (pal[k]) rgb[k] = hex(pal[k]);
+  var out = [];
+  for (var y = 0; y < rows.length; y++) for (var x = 0; x < rows[y].length; x++) {
+    var chr = rows[y][x]; if (chr !== '.' && rgb[chr]) out.push([x, y, rgb[chr]]);
+  }
+  return (spriteCache[key] = {w: rows[0].length, h: rows.length, px: out});
+}
+function sprite(id, frame, cast) {
+  var p = personOf(cast || DEFAULT_CAST, id) || {};
+  return buildSprite(p.sprite, p.role || 'bull', frame);
+}
+
+/* ---------- drawing ---------- */
+function drawRoom(fb, opts) {
+  var x, y;
+  rect(fb, 0, 0, W, 48, C.wall); rect(fb, 0, 46, W, 2, C.trim);
+  for (y = 48; y < 232; y++) for (x = 0; x < W; x++) px(fb, x, y, ((x / 6 | 0) + (y / 6 | 0)) % 2 ? C.floorA : C.floorB);
+  rect(fb, CARPET.x, CARPET.y, CARPET.w, CARPET.h, C.carpet); box(fb, CARPET.x, CARPET.y, CARPET.w, CARPET.h, C.carpetEdge);
+  box(fb, CARPET.x + 2, CARPET.y + 2, CARPET.w - 4, CARPET.h - 4, C.carpetDot);
+  for (y = CARPET.y + 6; y < CARPET.y + CARPET.h - 4; y += 8) for (x = CARPET.x + 6; x < CARPET.x + CARPET.w - 4; x += 8) px(fb, x, y, C.carpetDot);
+  rect(fb, BOARD.x, BOARD.y, BOARD.w, BOARD.h, C.boardFrame); rect(fb, BOARD.x + 2, BOARD.y + 2, BOARD.w - 4, BOARD.h - 4, C.board);
+  text(fb, 'THE BOARD', BOARD.x + (BOARD.w - textW('THE BOARD')) / 2 | 0, BOARD.y + 3, C.gold);
+  rect(fb, BOARD.x + 4, BOARD.y + 9, BOARD.w - 8, 1, C.boardFrame);
+  rect(fb, BELL.x + 3, BELL.y - 5, 3, 5, C.brassDark); text(fb, 'BELL', 6, 36, C.grey);
+  rect(fb, OFFICE.x, OFFICE.y, OFFICE.w, OFFICE.h, C.glass); rect(fb, OFFICE.x + 2, OFFICE.y + 2, OFFICE.w - 4, OFFICE.h - 10, opts.needs ? C.lit : C.officeIn);
+  text(fb, 'CULLON', OFFICE.x + 10, OFFICE.y + 4, C.white);
+  rect(fb, OFFICE.x + 10, OFFICE.y + 22, 24, 4, C.woodTop); rect(fb, OFFICE.x + 10, OFFICE.y + 26, 24, 6, C.wood);
+  rect(fb, OFFICE.x + 18, OFFICE.y + 14, 8, 7, C.frameC); rect(fb, OFFICE.x + 19, OFFICE.y + 15, 6, 4, opts.needs ? C.glow : C.dim);
+  rect(fb, OFFICE.x + 14, OFFICE.y + 50, 14, 10, C.door); px(fb, OFFICE.x + 25, OFFICE.y + 55, C.brass);
+  for (var d in DESKS) {
+    var k = DESKS[d];
+    rect(fb, k.x, k.y, 26, 4, C.woodTop); rect(fb, k.x, k.y + 4, 26, 8, C.wood); rect(fb, k.x, k.y + 11, 26, 1, C.woodDark);
+    rect(fb, k.x + 8, k.y - 7, 10, 7, C.frameC); rect(fb, k.x + 12, k.y - 1, 2, 1, C.frameC);
+    text(fb, 'D' + d.slice(-1), k.x + 2, k.y + 5, C.woodDark);
+  }
+  rect(fb, CONF.x, CONF.y, CONF.w, CONF.h, C.floorB); box(fb, CONF.x, CONF.y, CONF.w, CONF.h, C.glass);
+  rect(fb, CONF.x, CONF.y + 24, 1, 14, C.floorA);
+  text(fb, 'CONF', CONF.x + 4, CONF.y + 3, C.grey);
+  rect(fb, 150, 92, 18, 40, C.wood); box(fb, 150, 92, 18, 40, C.woodDark);
+  rect(fb, BEAR_DESK.x, BEAR_DESK.y, BEAR_DESK.w, 4, C.woodDark); rect(fb, BEAR_DESK.x, BEAR_DESK.y + 4, BEAR_DESK.w, 10, [86, 52, 30]);
+  rect(fb, BEAR_DESK.x + 26, BEAR_DESK.y - 8, 12, 8, C.frameC); rect(fb, BEAR_DESK.x + 27, BEAR_DESK.y - 7, 10, 5, C.dim);
+  rect(fb, BEAR_DESK.x + 4, BEAR_DESK.y - 6, 1, 6, C.brassDark); rect(fb, BEAR_DESK.x + 2, BEAR_DESK.y - 7, 5, 2, C.gold);
+  text(fb, 'KILLS', BEAR_DESK.x + 3, BEAR_DESK.y + 6, C.paperShade);
+  for (var f = 0; f < 3; f++) {
+    var fx = FILING.x + f * 9;
+    rect(fb, fx, FILING.y, 8, FILING.h, C.cabinet);
+    for (var dr = 0; dr < 4; dr++) { rect(fb, fx, FILING.y + dr * 8, 8, 1, C.cabinetDark); rect(fb, fx + 3, FILING.y + dr * 8 + 3, 2, 1, C.cabinetDark); }
+  }
+  text(fb, 'FILES', FILING.x + 3, FILING.y + FILING.h + 2, C.grey);
+  rect(fb, CAGE.x + 22, 166, 32, 4, C.woodTop); rect(fb, CAGE.x + 22, 170, 32, 8, C.wood);
+  rect(fb, CAGE.x + 44, 162, 4, 4, C.stamp);
+  for (x = CAGE.x; x < CAGE.x + CAGE.w; x += 3) rect(fb, x, CAGE.y, 1, CAGE.h, C.cage, 150);
+  rect(fb, CAGE.x, CAGE.y, CAGE.w, 1, C.cage); rect(fb, CAGE.x, CAGE.y + CAGE.h - 1, CAGE.w, 1, C.cage);
+  for (y = 204; y < 218; y++) for (x = CAGE.x; x < CAGE.x + 3; x++) px(fb, x, y, ((x / 6 | 0) + (y / 6 | 0)) % 2 ? C.floorA : C.floorB);
+  rect(fb, CAGE.x + 2, CAGE.y + 2, textW('RISK') + 2, 7, C.ink); text(fb, 'RISK', CAGE.x + 3, CAGE.y + 3, C.gold);
+  rect(fb, 0, 232, W, H - 232, C.strip); rect(fb, 0, 232, W, 1, C.trim);
+}
+
+var roomCache = {};
+function drawItem(fb, it) {
+  var x = it.x, y = it.y;
+  if (it.kind === 'crumple') { rect(fb, x, y + 1, 4, 2, C.paper); px(fb, x + 1, y, C.paper); px(fb, x + 2, y + 3, C.paperShade); px(fb, x + 3, y + 1, C.paperShade); }
+  else if (it.kind === 'stack') { rect(fb, x, y, 6, 4, C.paper); rect(fb, x, y + 1, 6, 1, C.paperShade); rect(fb, x, y + 3, 6, 1, C.paperShade); }
+  else { rect(fb, x, y, 3, 4, C.cup); rect(fb, x, y, 3, 1, C.coffee); px(fb, x + 3, y + 1, C.cup); }
+}
+function drawChar(fb, c, st, cast) {
+  var role = c.role, frame = 'stand', bob = 0;
+  var fdur = role === 'bear' ? 520 : role === 'bull' ? 160 : 240;
+  if (c.moving) frame = Math.floor(st / fdur) % 2 ? 'a' : 'b';
+  if (role === 'bull') {                                   // the swagger
+    if (c.moving) bob = frame === 'a' ? -1 : 0;
+    else bob = Math.floor(st / 700 + c.x) % 4 === 0 ? -1 : 0;
+  }
+  var p = personOf(cast, c.id) || {}, sp = buildSprite(p.sprite, role, frame);
+  var x0 = Math.round(c.x - sp.w / 2), y0 = Math.round(c.y - sp.h) + bob;
+  rect(fb, x0 + 1, Math.round(c.y), sp.w - 2, 1, C.ink, 110);
+  for (var i = 0; i < sp.px.length; i++) px(fb, x0 + sp.px[i][0], y0 + sp.px[i][1], sp.px[i][2]);
+  var prop = p.sprite && p.sprite.prop;
+  if (prop === 'clipboard' && !c.moving) rect(fb, x0 + 7, y0 + 7, 3, 4, C.woodTop);
+  if (prop === 'mop') {
+    rect(fb, x0 + 8, y0 + 3, 1, 9, C.door);
+    var wob = c.sweeping ? (Math.floor(st / 150) % 3) - 1 : 0;
+    rect(fb, x0 + 7 + wob, y0 + 11, 3, 2, C.grey);
+  }
+  return {x: x0, y: y0, w: sp.w};
+}
+function drawBubble(fb, b, at) {
+  var w = textW(b.tag) + 4, x = Math.max(1, Math.min(W - w - 1, at.x + (at.w / 2 | 0) - (w / 2 | 0))), y = Math.max(49, at.y - 10);
+  rect(fb, x, y, w, 8, C.white); box(fb, x, y, w, 8, C[b.c] || C.grey);
+  text(fb, b.tag, x + 2, y + 2, b.c === 'white' || b.c === 'grey' ? C.ink : darken(C[b.c]));
+  px(fb, x + (w / 2 | 0), y + 8, C.white);
+}
+function darken(c) { return [c[0] * 0.45 | 0, c[1] * 0.45 | 0, c[2] * 0.45 | 0]; }
+function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+function render(fb, sc) {
+  var key = sc.needs ? 'n' : '-';
+  if (!roomCache[key]) { roomCache[key] = newFB(W, H); drawRoom(roomCache[key], {needs: sc.needs}); }
+  copyFB(fb, roomCache[key]);
+  var i, seats = (sc.cast && sc.cast.seats) || {};
+  for (var d in DESKS) {                    // a monitor glows if its bull worked in the last hour
+    var desk = 'bull-' + d.slice(-1), e = sc.desksActive[desk];
+    var on = seats[desk] && e && (sc.clock - e.rt) < 3600000;
+    rect(fb, DESKS[d].x + 9, DESKS[d].y - 6, 8, 5, on ? C.glow : C.dim);
+  }
+  for (i = 0; i < sc.board.length; i++) text(fb, sc.board[i].s.slice(0, 24), BOARD.x + 4, BOARD.y + 12 + i * 7, C[sc.board[i].c]);
+  var shake = sc.bell ? (Math.floor(sc.st / 80) % 2 ? 1 : -1) : 0;
+  var bx = BELL.x + shake, by = BELL.y;
+  rect(fb, bx + 2, by, 5, 1, C.brass); rect(fb, bx + 1, by + 1, 7, 2, C.brass); rect(fb, bx, by + 3, 9, 3, C.brass);
+  rect(fb, bx - 1, by + 6, 11, 1, C.brassDark); px(fb, bx + 4, by + 7, C.brassDark);
+  if (sc.bell) text(fb, 'DING', 24, 18, Math.floor(sc.st / 200) % 2 ? C.gold : C.brass);
+  if (sc.needs) { rect(fb, OFFICE.x + 16, OFFICE.y + 51, 6, 7, C.red); text(fb, '!', OFFICE.x + 17, OFFICE.y + 52, C.white); }
+  var ks = String(sc.kills);
+  rect(fb, BEAR_DESK.x + 25, BEAR_DESK.y + 5, textW(ks) + 4, 7, C.ink); text(fb, ks, BEAR_DESK.x + 27, BEAR_DESK.y + 6, C.red);
+  for (i = 0; i < sc.items.length; i++) drawItem(fb, sc.items[i]);
+  if (sc.night) rect(fb, 0, 0, W, 232, C.night, 120);
+  var bubbles = [];
+  for (i = 0; i < sc.chars.length; i++) {
+    var at = drawChar(fb, sc.chars[i], sc.st, sc.cast);
+    if (sc.chars[i].bubble) bubbles.push([sc.chars[i].bubble, at]);
+  }
+  for (i = 0; i < bubbles.length; i++) drawBubble(fb, bubbles[i][0], bubbles[i][1]);
+  var t = sc.et;
+  text(fb, (t.wd || '') + ' ' + pad(t.h) + ':' + pad(t.m) + ' ET', 4, 236, C.white);
+  var tag = sc.dark ? 'DARK' : sc.mode === 'live' ? 'LIVE' : 'REPLAY';
+  text(fb, tag, W - 4 - textW(tag), 236, sc.dark ? C.grey : sc.mode === 'live' ? C.green : C.gold);
+  text(fb, 'KILLS ' + sc.kills + (sc.mode === 'replay' ? '  ' + sc.played + '/' + sc.total : ''), 4, 245, C.grey);
+  text(fb, (sc.lastLine || '').replace(/·/g, '-').slice(0, 44), 4, 254, C.teal);
+  if (sc.dark) { rect(fb, 0, 0, W, 232, C.night, 150); text(fb, 'OFFICE IS DARK', (W - textW('OFFICE IS DARK')) / 2 | 0, 120, C.grey); }
+  return fb;
+}
+
+/* ---------- the DOM panels, as strings (testable without a browser) ---------- */
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]; }); }
+function usd(v) { return v == null ? '–' : (v < 0 ? '−' : '+') + '$' + Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+function pct(v) { return v == null ? '–' : Math.round(v * 100) + '%'; }
+function cls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : ''; }
+var BOOK_NAME = {survivors: 'survivors', kills: 'kills book', dumb: 'dumb basket'};
+function tapeHTML(ledger, cast) {
+  var fills = (ledger && ledger.fills) || [];
+  if (!fills.length) return '<span>No fills yet.</span>';
+  return fills.map(function (f) {
+    var p = f.char && personOf(cast || DEFAULT_CAST, f.char);
+    var who = f.desk === 'dumb' ? 'dumb basket' : (p && p.name) || f.desk;
+    return '<span class="' + (f.side === 'buy' ? 'buy' : 'sell') + '">' + esc(f.side.toUpperCase() + ' ' + f.qty.toLocaleString('en-US') + ' ' + f.ticker + ' @ ' + f.price) +
+      ' · ' + esc(BOOK_NAME[f.book] || f.book) + ' · ' + esc(who) + '</span>';
+  }).join('');
+}
+function leaderHTML(ledger) {
+  var rows = (ledger && ledger.leaderboard) || [];
+  var h = '<thead><tr><th>#</th><th>Desk</th><th class="num">P&amp;L</th><th class="num">Hit</th></tr></thead><tbody>';
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    h += '<tr><td>' + r.rank + '</td><td>' + esc(r.name) + (r.desk === 'bear' ? ' <span class="muted">(saved)</span>' : '') +
+      '</td><td class="num ' + cls(r.score) + '">' + usd(r.score) + '</td><td class="num">' + pct(r.hit_rate) + '</td></tr>';
+  }
+  return h + '</tbody>';
+}
+function benchText(ledger) {
+  if (!ledger || !ledger.books) return '';
+  var s = ledger.books.survivors, d = ledger.books.dumb;
+  return 'Survivors ' + usd(s.pnl) + ' vs. the dumb basket ' + usd(d.pnl) + ' (equal-weight, same universe). Paper money, ' +
+    '$' + (ledger.rules ? ledger.rules.ticket_usd : 2000).toLocaleString('en-US') + ' tickets, IBKR fees.';
+}
+function booksHTML(ledger) {
+  var b = (ledger && ledger.books) || {}, h = '<thead><tr><th>Book</th><th class="num">P&amp;L</th><th class="num">Max DD</th><th class="num">Hit</th></tr></thead><tbody>';
+  ['survivors', 'kills', 'dumb'].forEach(function (k) {
+    var x = b[k]; if (!x) return;
+    h += '<tr><td>' + esc(x.label) + '</td><td class="num ' + cls(x.pnl) + '">' + usd(x.pnl) + '</td><td class="num">' +
+      usd(-x.max_drawdown).replace('+', '') + '</td><td class="num">' + pct(x.hit_rate) + '</td></tr>';
+  });
+  return h + '</tbody>';
+}
+function needsHTML(feed) {
+  var n = (feed && feed.needs_cullon) || [];
+  if (!n.length) return '';
+  return '<h2>Needs Cullon</h2><ul>' + n.map(function (i) { return '<li>' + esc(i.text) + '</li>'; }).join('') + '</ul>';
+}
+// The written feed shows a move once it has played on the floor.
+function feedHTML(moves, limit, ch, upTo) {
+  var out = [], m = (moves || []).filter(function (x) { return upTo == null || ms(x) <= upTo; }).sort(byPlay);
+  m = m.slice(-(limit || 40)).reverse();
+  for (var i = 0; i < m.length; i++) {
+    var t = et(ms(m[i])), line = m[i].line || m[i].what;
+    out.push('<li><time>' + pad(t.h) + ':' + pad(t.m) + '</time>' + esc(ch ? church(line) : line) + '</li>');
+  }
+  return out.join('');
+}
+// Dark: night, the weekend, or nothing played for 90 minutes and nothing queued.
+function isDark(feed, nowMs) {
+  var t = et(nowMs);
+  if (t.h < 7 || t.h >= 20 || t.wd === 'Sat' || t.wd === 'Sun') return true;
+  var until = feed && feed.office && feed.office.playing_until ? Date.parse(feed.office.playing_until) : 0;
+  return nowMs - until > 90 * 60000;
+}
+function layout(vw) {
+  var w = Math.min(vw, 560);
+  return {canvasW: w, canvasH: Math.round(w * H / W), scale: w / W};
+}
+
+var api = {W: W, H: H, HOME: HOME, DESK_ORDER: DESK_ORDER, SPEED: SPEED, CARPET: CARPET, SWEEP_MS: SWEEP_MS,
+  BELL_MS: BELL_MS, DEFAULT_CAST: DEFAULT_CAST, HEADS: HEADS,
+  newFB: newFB, schedule: schedule, addLive: addLive, sceneAt: sceneAt, render: render, clockAt: clockAt,
+  et: et, isNight: isNight, isDark: isDark, midnightsBetween: midnightsBetween, place: place, itemPos: itemPos,
+  sprite: sprite, buildSprite: buildSprite, text: text, church: church, tapeHTML: tapeHTML, leaderHTML: leaderHTML,
+  booksHTML: booksHTML, needsHTML: needsHTML, feedHTML: feedHTML, benchText: benchText, esc: esc, layout: layout,
+  playTime: ms, glyphs: G};
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+root.Floor = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+
+<script id="app">
+/* Browser glue: fetch feed.json + ledger.json from this site, draw, poll. */
+(function () {
+  'use strict';
+  if (typeof document === 'undefined') return;
+  var F = window.Floor, $ = function (id) { return document.getElementById(id); };
+  var cv = $('office'), g = cv.getContext('2d'), img = g.createImageData(F.W, F.H);
+  var fb = {w: F.W, h: F.H, data: img.data};
+  var S = {feed: null, ledger: null, sched: null, mode: 'live', t0: 0, church: false, shown: -1, pollMs: 60000};
+  try { S.church = localStorage.getItem('mp-church') === '1'; } catch (e) {}
+
+  function get(name) {
+    return fetch(name + '?t=' + Date.now(), {cache: 'no-store'})
+      .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+  }
+  function size() {
+    var L = F.layout(window.innerWidth || 390);
+    cv.style.width = L.canvasW + 'px'; cv.style.height = L.canvasH + 'px';
+  }
+  function panels() {
+    var cast = S.feed && S.feed.cast;
+    $('tape').innerHTML = F.tapeHTML(S.ledger, cast) + F.tapeHTML(S.ledger, cast);
+    $('leader').innerHTML = F.leaderHTML(S.ledger);
+    $('bench').textContent = F.benchText(S.ledger);
+    $('books').innerHTML = F.booksHTML(S.ledger);
+    $('kills').textContent = String((S.ledger && S.ledger.kill_count) || 0);
+    var n = F.needsHTML(S.feed); $('needs').innerHTML = n; $('needs').hidden = !n;
+    if (S.feed) $('updated').textContent = 'Updated ' + new Date(S.feed.updated).toLocaleString() + '.';
+    S.shown = -1;
+  }
+  function feedList(sc) {
+    var upTo = sc ? sc.clock : Date.now(), key = (sc ? sc.played : 0) + (S.church ? 'c' : '');
+    if (key === S.shown) return;
+    S.shown = key;
+    $('feed').innerHTML = F.feedHTML(S.feed && S.feed.moves, 40, S.church, upTo);
+  }
+  function setMode(m) {
+    S.mode = m;
+    var now = Date.now(), moves = (S.feed && S.feed.moves) || [];
+    S.t0 = performance.now();
+    S.sched = m === 'replay'
+      ? F.schedule(moves.filter(function (x) { return F.playTime(x) <= now; }), {mode: 'replay', duration: 240000})
+      : F.schedule(moves, {mode: 'live', nowReal: now, nowSt: 0});
+    $('btn-live').setAttribute('aria-pressed', String(m === 'live'));
+    $('btn-replay').setAttribute('aria-pressed', String(m === 'replay'));
+    var dark = F.isDark(S.feed, now), b = $('banner');
+    if (m === 'replay') { b.hidden = false; b.textContent = (dark ? 'The office is dark. ' : '') + 'Replaying the last 24 hours (' + S.sched.events.length + ' moves).'; }
+    else { b.hidden = !dark; b.textContent = 'The office is dark. Tap Replay 24h to watch the day.'; }
+    var tag = $('mode'); tag.className = 'mode ' + (m === 'replay' ? 'replay' : dark ? 'dark' : 'live');
+    tag.textContent = m === 'replay' ? 'REPLAY' : dark ? 'DARK' : 'LIVE';
+    S.shown = -1;
+  }
+  function frame(now) {
+    if (S.sched) {
+      var st = now - S.t0;
+      if (S.mode === 'replay' && st > S.sched.duration) { S.t0 = now; st = 0; }
+      var sc = F.sceneAt(S.sched, st, {nowReal: Date.now(), ledger: S.ledger, feed: S.feed, church: S.church,
+        dark: S.mode === 'live' && F.isDark(S.feed, Date.now())});
+      F.render(fb, sc);
+      g.putImageData(img, 0, 0);
+      feedList(sc);
+      S.last = sc;
+    }
+    requestAnimationFrame(frame);
+  }
+  function poll() {
+    return Promise.all([get('feed.json'), get('ledger.json')]).then(function (r) {
+      var first = !S.feed;
+      if (r[0]) S.feed = r[0];
+      if (r[1]) S.ledger = r[1];
+      panels();
+      if (first) setMode(F.isDark(S.feed, Date.now()) ? 'replay' : 'live');
+      else if (S.mode === 'live' && S.feed) F.addLive(S.sched, S.feed.moves, performance.now() - S.t0, Date.now(), 1500);
+    });
+  }
+  $('church').checked = S.church;
+  $('church').addEventListener('change', function (e) {
+    S.church = !!e.target.checked; S.shown = -1;
+    try { localStorage.setItem('mp-church', S.church ? '1' : '0'); } catch (x) {}
+  });
+  $('btn-live').addEventListener('click', function () { setMode('live'); });
+  $('btn-replay').addEventListener('click', function () { setMode('replay'); });
+  window.addEventListener('resize', size);
+  size();
+  poll().then(function () { requestAnimationFrame(frame); });
+  setInterval(poll, S.pollMs);
+  window.__floor = S;
+})();
+</script>
+</body>
+</html>
